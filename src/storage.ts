@@ -1,8 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Medication } from './types';
 import { scheduleDaily, cancelNotification } from './notifications';
+import { syncHardwareSchedules } from './hardwareApi';
 
 const KEY = 'medications';
+const HARDWARE_IP_KEY = 'arduino_ip';
 
 export const todayString = () => {
   const d = new Date();
@@ -16,7 +18,25 @@ export async function loadMeds(): Promise<Medication[]> {
   return raw ? JSON.parse(raw) : [];
 }
 
-const save = (meds: Medication[]) => AsyncStorage.setItem(KEY, JSON.stringify(meds));
+const save = async (meds: Medication[]) => {
+  await AsyncStorage.setItem(KEY, JSON.stringify(meds));
+  const ip = await getArduinoIp();
+  if (ip) {
+    syncHardwareSchedules(ip, meds).catch(() => {});
+  }
+};
+
+export async function getArduinoIp(): Promise<string> {
+  return (await AsyncStorage.getItem(HARDWARE_IP_KEY)) || '';
+}
+
+export async function setArduinoIp(ip: string): Promise<void> {
+  await AsyncStorage.setItem(HARDWARE_IP_KEY, ip.trim());
+  const meds = await loadMeds();
+  if (ip.trim()) {
+    syncHardwareSchedules(ip.trim(), meds).catch(() => {});
+  }
+}
 
 export async function addMed(input: {
   name: string; pillsRemaining: number; pillsPerDose: number; hour: number; minute: number;
@@ -46,3 +66,4 @@ export async function markTaken(id: string) {
     )
   );
 }
+
