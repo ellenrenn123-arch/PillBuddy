@@ -1,15 +1,15 @@
 # Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
 
-# dependencies
+# -----------------------------------------------------------------------------
+# 1. React Native & Mobile App (PillBuddy App)
+# -----------------------------------------------------------------------------
 node_modules/
-
-# Expo
 .expo/
 dist/
 web-build/
 expo-env.d.ts
 
-# Native
+# Native builds & keys
 .kotlin/
 *.orig.*
 *.jks
@@ -17,25 +17,39 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
+/ios
+/android
 
-# Metro
+# Metro & Debug
 .metro-health-check*
-
-# debug
 npm-debug.*
 yarn-debug.*
 yarn-error.*
 
-# macOS
-.DS_Store
-*.pem
-
-# local env files
-.env*.local
-
-# typescript
+# TypeScript
 *.tsbuildinfo
 
-# generated native folders
-/ios
-/android
+# Local env files
+.env*.local
+
+# -----------------------------------------------------------------------------
+# 2. Arduino Firmware (PillBuddyDispenser)
+# -----------------------------------------------------------------------------
+# Wi-Fi Credentials & Secrets (NEVER COMMIT Wi-Fi PASSWORDS)
+firmware/**/secrets.h
+firmware/**/secrets.local.h
+
+# Arduino & Build Artifacts
+firmware/**/build/
+.pio/
+*.elf
+*.hex
+*.bin
+
+# -----------------------------------------------------------------------------
+# 3. System & Editor Files
+# -----------------------------------------------------------------------------
+.DS_Store
+*.pem
+.vscode/
+.idea/

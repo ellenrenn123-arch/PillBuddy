@@ -80,3 +80,17 @@ export async function triggerManualDispense(ip: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Triggers carousel homing routine via limit switch on Pin 4.
+ */
+export async function triggerHoming(ip: string): Promise<boolean> {
+  try {
+    const formattedIp = ip.replace(/^https?:\/\//, '').trim();
+    const res = await fetch(`http://${formattedIp}/home`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+

@@ -25,6 +25,8 @@
 #include <RTC.h>
 #include <Servo.h>
 #include <SoftwareSerial.h>
+#include <EEPROM.h>
+#include "secrets.h"
 
 // -----------------------------------------------------------------------------
 // Pin Configuration
@@ -34,18 +36,20 @@
 #define STEPPER_IN3 10
 #define STEPPER_IN4 11
 
-#define SERVO_PIN   6
-#define LED_PIN     5
+#define SERVO_PIN        6
+#define LED_PIN          5
+#define LIMIT_SWITCH_PIN 4
 
 #define DFPLAYER_RX 2
 #define DFPLAYER_TX 3
 
+#define EEPROM_COMPARTMENT_ADDR 0
+
 // -----------------------------------------------------------------------------
-// Stepper Motor Constants (28BYJ-48 Half-Step Mode)
+// Stepper Motor Constants (28BYJ-48 Half-Step Mode: 4096 steps/rev)
 // -----------------------------------------------------------------------------
-// 360 / 7 = 51.4285714286 degrees
-// 4096 steps per full 360 turn -> 4096 / 7 = 585 steps per compartment
-const int STEPS_PER_DISPENSE = 585;
+// 360 / 7 = 51.4285714286 degrees per compartment slot
+const long STEPS_PER_REV = 4096;
 const int HALF_STEP_SEQ[8][4] = {
   {1, 0, 0, 0},
   {1, 1, 0, 0},
@@ -58,7 +62,7 @@ const int HALF_STEP_SEQ[8][4] = {
 };
 
 // -----------------------------------------------------------------------------
-// Schedule Data Structure
+// Schedule Data Structure & State Variables
 // -----------------------------------------------------------------------------
 #define MAX_SCHEDULES 10
 
@@ -71,12 +75,13 @@ struct AlarmTime {
 AlarmTime g_schedules[MAX_SCHEDULES];
 int g_scheduleCount = 0;
 int g_currentCompartment = 0; // 0 to 6
+long g_currentStepPosition = 0; // Step position relative to Home (0 to 4095)
 bool g_isDispensing = false;
 int g_lastDispensedMinute = -1;
 
-// WiFi Credentials
-char ssid[] = "PillBuddy_Hotspot"; // Replace or set via AP/App config
-char pass[] = "pillbuddy123";      // WPA2 password
+// WiFi Credentials from secrets.h
+char ssid[] = SECRET_SSID;
+char pass[] = SECRET_PASS;
 WiFiServer server(80);
 
 // Hardware Drivers
@@ -89,7 +94,8 @@ SemaphoreHandle_t xScheduleMutex = NULL;
 
 enum DispenseTriggerSource {
   TRIGGER_SCHEDULE,
-  TRIGGER_MANUAL
+  TRIGGER_MANUAL,
+  TRIGGER_HOME
 };
 
 struct DispenseEvent {
@@ -121,9 +127,81 @@ void stepCarousel(int steps) {
   digitalWrite(STEPPER_IN4, LOW);
 }
 
+// Moves carousel to target compartment n (0 to 6) using absolute step targeting
+// Formula: long targetStep = round(n * (float)STEPS_PER_REV / 7.0);
+// This eliminates fractional step rounding accumulation over 4096 / 7 steps!
+void rotateToCompartment(int nextCompartment) {
+  nextCompartment = nextCompartment % 7;
+  long targetStep = round(nextCompartment * ((float)STEPS_PER_REV / 7.0));
+  
+  long stepsToMove = targetStep - g_currentStepPosition;
+  if (stepsToMove < 0) {
+    stepsToMove += STEPS_PER_REV;
+  }
+
+  Serial.print("[Stepper] Moving to compartment #");
+  Serial.print(nextCompartment + 1);
+  Serial.print(" (Target step: ");
+  Serial.print(targetStep);
+  Serial.print(", Current step: ");
+  Serial.print(g_currentStepPosition);
+  Serial.print(", Steps to move: ");
+  Serial.print(stepsToMove);
+  Serial.println(")");
+
+  stepCarousel(stepsToMove);
+
+  g_currentStepPosition = targetStep % STEPS_PER_REV;
+  g_currentCompartment = nextCompartment;
+
+  // Persist current compartment index to EEPROM non-volatile storage
+  EEPROM.update(EEPROM_COMPARTMENT_ADDR, (uint8_t)g_currentCompartment);
+}
+
+// Rotates carousel counter-clockwise until limit switch triggers, resetting home baseline to 0
+void homeCarousel() {
+  Serial.println("[Homing] Starting carousel homing sequence...");
+  int maxStepsAllowed = 4500; // ~1.1 full rotations max limit
+  int stepsTaken = 0;
+
+  // Step step-by-step until limit switch pin hits GND (LOW)
+  while (digitalRead(LIMIT_SWITCH_PIN) == HIGH && stepsTaken < maxStepsAllowed) {
+    int stepIndex = stepsTaken % 8;
+    setStepperPins(stepIndex);
+    delay(3);
+    stepsTaken++;
+  }
+
+  // Disable stepper outputs
+  digitalWrite(STEPPER_IN1, LOW);
+  digitalWrite(STEPPER_IN2, LOW);
+  digitalWrite(STEPPER_IN3, LOW);
+  digitalWrite(STEPPER_IN4, LOW);
+
+  if (digitalRead(LIMIT_SWITCH_PIN) == LOW) {
+    g_currentCompartment = 0;
+    g_currentStepPosition = 0;
+    EEPROM.update(EEPROM_COMPARTMENT_ADDR, 0);
+
+    Serial.println("[Homing] Limit switch triggered! Carousel homed to Compartment #0 (Step 0).");
+    
+    // Back off 30 steps to un-press switch
+    for (int i = 0; i < 30; i++) {
+      int stepIndex = (30 - i) % 8;
+      setStepperPins(stepIndex);
+      delay(3);
+    }
+    digitalWrite(STEPPER_IN1, LOW);
+    digitalWrite(STEPPER_IN2, LOW);
+    digitalWrite(STEPPER_IN3, LOW);
+    digitalWrite(STEPPER_IN4, LOW);
+  } else {
+    Serial.println("[Homing] WARNING: Homing timed out! Check limit switch wiring on Pin 4.");
+  }
+}
+
 void playBarkSound() {
   // DFPlayer Mini Command to play Track 0001 (bark.mp3 in /01 folder)
-  // Standard DFPlayer serial packet (10 bytes): 7E FF 06 03 00 00 01 FE F7 (or simple command)
   uint8_t playCmd[10] = {0x7E, 0xFF, 0x06, 0x03, 0x00, 0x00, 0x01, 0xFE, 0xF7, 0xEF};
   dfSerial.write(playCmd, 10);
 }
@@ -145,14 +223,18 @@ void TaskDispenser(void *pvParameters) {
   for (;;) {
     if (xQueueReceive(xDispenseQueue, &event, portMAX_DELAY) == pdTRUE) {
       g_isDispensing = true;
+
+      if (event.source == TRIGGER_HOME) {
+        homeCarousel();
+        g_isDispensing = false;
+        continue;
+      }
+
       Serial.println("[DispenserTask] Starting pill dispensing sequence...");
 
-      // Step 1: Stepper motor turns 51.4285714286° (585 half-steps)
-      Serial.print("[DispenserTask] Rotating carousel 51.42857° (~585 steps) to compartment ");
-      g_currentCompartment = (g_currentCompartment + 1) % 7;
-      Serial.println(g_currentCompartment);
-
-      stepCarousel(STEPS_PER_DISPENSE);
+      // Step 1: Rotate to next compartment using absolute target calculation
+      int nextSlot = (g_currentCompartment + 1) % 7;
+      rotateToCompartment(nextSlot);
 
       // Step 2: Wait 2 seconds (or enough time to complete turn)
       Serial.println("[DispenserTask] Stepper turn complete. Waiting 2 seconds...");
@@ -176,6 +258,8 @@ void TaskDispenser(void *pvParameters) {
       g_isDispensing = false;
     }
   }
+}
+
 }
 
 // -----------------------------------------------------------------------------
@@ -257,6 +341,18 @@ void TaskWebServer(void *pvParameters) {
         json += g_scheduleCount;
         json += "}";
         client.println(json);
+
+      } else if (reqHeader.indexOf("POST /home") >= 0 || reqHeader.indexOf("GET /home") >= 0) {
+        DispenseEvent event;
+        event.source = TRIGGER_HOME;
+        event.compartmentIndex = 0;
+        xQueueSend(xDispenseQueue, &event, 0);
+
+        client.println("HTTP/1.1 200 OK");
+        client.println("Content-Type: application/json");
+        client.println("Access-Control-Allow-Origin: *");
+        client.println();
+        client.println("{\"success\":true,\"message\":\"Homing sequence queued\"}");
 
       } else if (reqHeader.indexOf("POST /dispense") >= 0 || reqHeader.indexOf("GET /dispense") >= 0) {
         DispenseEvent event;
@@ -349,14 +445,25 @@ void setup() {
   pinMode(STEPPER_IN3, OUTPUT);
   pinMode(STEPPER_IN4, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
+  pinMode(LIMIT_SWITCH_PIN, INPUT_PULLUP);
 
   tongueServo.attach(SERVO_PIN);
   tongueServo.write(0); // Start at rest angle 0°
+
+  // Load saved compartment position from non-volatile EEPROM storage
+  uint8_t savedSlot = EEPROM.read(EEPROM_COMPARTMENT_ADDR);
+  if (savedSlot < 7) {
+    g_currentCompartment = savedSlot;
+    g_currentStepPosition = round(g_currentCompartment * ((float)STEPS_PER_REV / 7.0));
+    Serial.print("[EEPROM] Restored carousel position from non-volatile storage: Compartment #");
+    Serial.println(g_currentCompartment + 1);
+  }
 
   // Initialize Built-in RTC
   RTC.begin();
   RTCTime startTime(6, Month::OCTOBER, 2026, 8, 0, 0, DayOfWeek::TUESDAY, SaveLight::SAVING_TIME_OFF);
   RTC.setTime(startTime);
+
 
   // Initialize WiFi
   Serial.print("Connecting to WiFi network: ");
@@ -390,9 +497,16 @@ void setup() {
   xTaskCreate(TaskRTCAlarm,  "RTCAlarmTask",  512, NULL, 1, NULL);
   xTaskCreate(TaskWebServer, "WebServerTask", 1024, NULL, 1, NULL);
 
+  // Queue initial homing sequence on boot
+  DispenseEvent bootHomeEvent;
+  bootHomeEvent.source = TRIGGER_HOME;
+  bootHomeEvent.compartmentIndex = 0;
+  xQueueSend(xDispenseQueue, &bootHomeEvent, 0);
+
   Serial.println("PillBuddy FreeRTOS Dispenser Firmware initialized!");
 }
 
 void loop() {
   // Empty - FreeRTOS handles task scheduling
 }
+

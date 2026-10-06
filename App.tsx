@@ -7,7 +7,8 @@ import * as Notifications from 'expo-notifications';
 import { Medication } from './src/types';
 import { addMed, deleteMed, getArduinoIp, loadMeds, markTaken, setArduinoIp, todayString } from './src/storage';
 import { ACTION_TAKEN, setupNotifications } from './src/notifications';
-import { fetchHardwareStatus, syncHardwareTime, syncHardwareSchedules, triggerManualDispense, DispenserStatus } from './src/hardwareApi';
+import { fetchHardwareStatus, syncHardwareTime, syncHardwareSchedules, triggerManualDispense, triggerHoming, DispenserStatus } from './src/hardwareApi';
+
 
 export default function App() {
   const [meds, setMeds] = useState<Medication[]>([]);
@@ -237,6 +238,13 @@ function HardwareModal({
     onCheckStatus();
   };
 
+  const handleHoming = async () => {
+    setActionMsg('Homing carousel via limit switch...');
+    const ok = await triggerHoming(inputIp);
+    setActionMsg(ok ? '✅ Carousel homing queued!' : '❌ Homing request failed');
+    onCheckStatus();
+  };
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={s.modalScreen}>
@@ -266,7 +274,7 @@ function HardwareModal({
               <>
                 <Text>RTC Clock: {status.rtcTime}</Text>
                 <Text>Current Carousel Slot: #{status.currentCompartment + 1} / 7</Text>
-                <Text>Dispenser State: {status.isDispensing ? '⚙️ Rotating' : 'Idle'}</Text>
+                <Text>Dispenser State: {status.isDispensing ? '⚙️ Moving' : 'Idle'}</Text>
                 <Text>Active Schedules: {status.scheduleCount}</Text>
               </>
             )}
@@ -276,6 +284,11 @@ function HardwareModal({
         {actionMsg ? <Text style={s.actionText}>{actionMsg}</Text> : null}
 
         <View style={s.actionGroup}>
+          <Button
+            title="🎯 Home / Calibrate Carousel (Pin 4 Switch)"
+            color="#e65100"
+            onPress={handleHoming}
+          />
           <Button
             title="🐾 Test Dispense (51.4° Turn + Servo + Bark)"
             color="#2e7d32"
@@ -292,6 +305,7 @@ function HardwareModal({
             onPress={handleSyncSchedules}
           />
         </View>
+
 
         <View style={{ marginTop: 'auto' }}>
           <Button title="Done" onPress={onClose} />
